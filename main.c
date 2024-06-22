@@ -12,12 +12,18 @@
 
 #define CTRL_PLUS(k) ((k) & 0x1f)
 
-char *buffer = NULL;
-size_t buffer_size = 0;
-size_t cursor_pos = 0;
+struct row {
+    size_t size;
+    char *data;
+};
 
-int term_rows;
-int term_cols;
+struct {
+    size_t n_rows;
+    struct row *rows;
+
+    size_t cx;
+    size_t cy;
+} buffer;
 
 struct termios reset_termios;
 
@@ -52,49 +58,52 @@ void enable_raw_mode() {
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) die("tcsetattr");
 }
 
-void update_term_size() {
-    struct winsize w;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == -1) die("ioctl");
+/* Buffer manipulation */
 
-    term_rows = w.ws_row;
-    term_cols = w.ws_col;
+void init_row(struct row *row) {
+    row->size = 0;
+    row->data = malloc(0);
 }
 
-/* String manipulation */
+void init_buffer() {
+    buffer.n_rows = 1;
+    buffer.rows = malloc(buffer.n_rows * sizeof(struct row));
+    init_row(&buffer.rows[0]);
 
-char *string_replace(const char *string, const char *find, const char *replace) {
-    int str_len = strlen(string);
-    int find_len = strlen(find);
-    int replace_len = strlen(replace);
+    buffer.cx = 0;
+    buffer.cy = 0;
+}
 
-    int replacements = 0;
-    const char *match = strstr(string, find);
-    while (match != NULL) {
-        replacements++;
-        match += find_len;
-        match = strstr(match, find);
-    }
 
-    char *out = malloc(str_len + (replace_len - find_len) * replacements + 1);
-    if (out == NULL) die("string_replace malloc");
+void insert_char(struct row *row, int index, char c) {
+    row->size++;
+    row->data = realloc(row->data, row->size);
+    memmove(&row->data[index + 1], &row->data[index], row->size - index - 1);
+    row->data[index] = c;
+}
 
-    int i = 0;
-    match = string;
+void remove_char(struct row *row, int index) {
+    row->size--;
+    memmove(&row->data[index], &row->data[index + 1], 1);
+}
 
-    while ((match = strstr(match, find)) != NULL) {
-        memcpy(out + i, string, match - string);
-        i += match - string;
 
-        memcpy(out + i, replace, replace_len);
-        i += replace_len;
+void insert_row(int index) {
+    buffer.n_rows++;
+    buffer.rows = realloc(buffer.rows, buffer.n_rows * sizeof(struct row));
+    memmove(&buffer.rows[index + 1], &buffer.rows[index], (buffer.n_rows - index - 1) * sizeof(struct row));
+    init_row(&buffer.rows[index]);
+}
 
-        match += find_len;
-        string = match;
-    }
+void concat_row(struct row *dest, struct row *src) {
+    dest->size += src->size;
+    dest->data = realloc(dest->data, dest->size);
+    memcpy(&dest->data[dest->size - src->size], src->data, src->size);
+}
 
-    strcpy(out + i, string);
-
-    return out;
+void remove_row(int index) {
+    buffer.n_rows--;
+    memmove(&buffer.rows[index], &buffer.rows[index + 1], buffer.n_rows - index);
 }
 
 /* Printing */
@@ -107,10 +116,15 @@ void write_string(const char *string) {
     if (write(STDOUT_FILENO, string, strlen(string)) != strlen(string)) die("write_string");
 }
 
-void write_unix_string(const char *string) {
-    char *writable_string = string_replace(string, "\n", "\r\n");
-    write_string(writable_string);
-    free(writable_string);
+void write_row(struct row *row) {
+    if (write(STDOUT_FILENO, row->data, row->size) != row->size) die("write_row");
+}
+
+void write_buffer() {
+    for (int i = 0; i < buffer.n_rows; i++) {
+        write_row(&buffer.rows[i]);
+        write_string("\r\n");
+    }
 }
 
 void clear_screen() {
@@ -118,14 +132,34 @@ void clear_screen() {
     write_string("\x1b[1;1H");
 }
 
+/* Terminal manipulation */
+
+void set_row(int row) {
+    write_string("\x1b[");
+    int length = snprintf(NULL, 0, "%d", row) + 1;
+    char number[length];
+    snprintf(number, length, "%d", row);
+    write_string(number);
+    write_string("H");
+}
+
+void set_column(int column) {
+    write_string("\x1b[");
+    int length = snprintf(NULL, 0, "%d", column) + 1;
+    char number[length];
+    snprintf(number, length, "%d", column);
+    write_string(number);
+    write_string("G");
+}
+
 /* Processing */
 
 char read_key_press() {
-    int nread;
+    int chars_read;
     char c;
 
-    while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
-        if (nread == -1) die("read");
+    while ((chars_read = read(STDIN_FILENO, &c, 1)) != 1) {
+        if (chars_read == -1) die("read");
     }
 
     return c;
@@ -136,15 +170,88 @@ void handle_key_press() {
 
     if (c == CTRL_PLUS('q')) {
         clear_screen();
-        exit(0);
-    } else if (!iscntrl(c)) {
-        buffer[cursor_pos++] = c;
-        write_char(c);
+        write_buffer();
+        exit(EXIT_FAILURE);
     } else if (c == KEY_ENTER) {
-        buffer[cursor_pos++] = '\n';
-        write_string("\r\n");
+        insert_row(buffer.cy + 1);
+        buffer.rows[buffer.cy + 1].size = buffer.rows[buffer.cy].size - buffer.cx;
+        memcpy(buffer.rows[buffer.cy + 1].data, &buffer.rows[buffer.cy].data[buffer.cx], buffer.rows[buffer.cy + 1].size);
+        buffer.rows[buffer.cy].size = buffer.cx;
+
+        write_string("\x1b[0J");
+
+        for (int i = buffer.cy + 1; i < buffer.n_rows; i++) {
+            write_string("\r\n");
+            write_row(&buffer.rows[i]);
+        }
+
+        buffer.cx = 0;
+        buffer.cy++;
+
+        set_row(buffer.cy + 1);
+        set_column(buffer.cx + 1);
     } else if (c == KEY_BACKSPACE) {
-        // TODO: Implement backspace
+        if (buffer.cx == 0 && buffer.cy == 0) return;
+        if (buffer.cx == 0) {
+            concat_row(&buffer.rows[buffer.cy-1], &buffer.rows[buffer.cy]);
+            remove_row(buffer.cy);
+            buffer.cy--;
+            buffer.cx = buffer.rows[buffer.cy].size;
+
+            write_string("\x1b[1F");
+            write_string("\x1b[0K");
+            write_string(buffer.rows[buffer.cy].data);
+            write_string("\x1b[0J");
+
+            for (int i = buffer.cy + 2; i < buffer.n_rows; i++) {
+                write_string("\r\n");
+                write_row(&buffer.rows[i]);
+            }
+
+            set_row(buffer.cy + 1);
+            set_column(buffer.cx + 1);
+        } else {
+            remove_char(&buffer.rows[buffer.cy], buffer.cx);
+            buffer.cx--;
+
+            write_string("\b");
+            write_string("\x1b[0K");
+            write(STDOUT_FILENO, &buffer.rows[buffer.cy] + buffer.cx, buffer.rows[buffer.cy].size - buffer.cx);
+        }
+    } else if (c == '\x1b') {
+        if (read_key_press() == '[') {
+            char arrow = read_key_press();
+            if (arrow == 'D') {                 // Left
+                if (buffer.cx > 0) {
+                    buffer.cx--;
+                    write_string("\x1b[D");
+                }
+            } else if (arrow == 'C') {          // Right
+                if (buffer.cx < buffer.rows[buffer.cy].size) {
+                    buffer.cx++;
+                    write_string("\x1b[C");
+                }
+            } else if (arrow == 'A') {          // Up
+                if (buffer.cy > 0) {
+                    buffer.cy--;
+                    write_string("\x1b[A");
+                }
+            } else if (arrow == 'B') {          // Down
+                if (buffer.cy < buffer.n_rows - 1) {
+                    buffer.cy++;
+                    write_string("\x1b[B");
+
+                    if (buffer.cx >= buffer.rows[buffer.cy].size) {
+                        buffer.cx = buffer.rows[buffer.cy].size - 1;
+                    }
+                }
+            }
+        }
+    } else if (isprint(c)) {
+        write_char(c);
+
+        insert_char(&buffer.rows[buffer.cy], buffer.cx, c);
+        buffer.cx++;
     }
 }
 
@@ -153,14 +260,8 @@ void handle_key_press() {
 int main() {
     enable_raw_mode();
     clear_screen();
-    update_term_size();
 
-    // TODO: Abstract this so I don't have to look at it
-    buffer_size = 1024;
-    buffer = malloc(buffer_size * sizeof(buffer[0]));
-    for (int i = 0; i < buffer_size; i++) {
-        buffer[i] = '\0';
-    }
+    init_buffer();
 
     while(1) {
         handle_key_press();
