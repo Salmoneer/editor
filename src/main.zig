@@ -27,6 +27,10 @@ const PieceTable = struct {
 
     const Self = @This();
 
+    const Error = error{
+        IndexOutOfRange,
+    };
+
     pub fn init(allocator: Allocator, original_data: []const u8) Self {
         const original = allocator.alloc(u8, original_data.len) catch @panic("OOM");
         std.mem.copyForwards(u8, original, original_data);
@@ -104,7 +108,11 @@ const PieceTable = struct {
         self.changes_len += data.len;
     }
 
-    pub fn insert(self: *Self, index: usize, data: []const u8) void {
+    pub fn insert(self: *Self, index: usize, data: []const u8) Error!void {
+        if (index >= self.length()) {
+            return Error.IndexOutOfRange;
+        }
+
         const change_start_index = self.changes_len;
 
         self.append_changes(data);
@@ -136,6 +144,43 @@ const PieceTable = struct {
 
         self.entries.items[split_entry_index].length = index - entries_length;
     }
+
+    fn remove_one(self: *Self, index: usize) Error!void {
+        if (index >= self.length()) {
+            return Error.IndexOutOfRange;
+        }
+
+        var split_entry_index: usize = 0;
+        var split_entry_length: usize = 0;
+        var entries_length: usize = 0;
+
+        for (0.., self.entries.items) |i, entry| {
+            if (entries_length + entry.length > index) {
+                split_entry_index = i;
+                split_entry_length = entry.length;
+                break;
+            }
+
+            entries_length += entry.length;
+        }
+
+        if (entries_length + split_entry_length - 1 == index) {
+            self.entries.items[split_entry_index].length -= 1;
+        } else {
+            self.entries.insert(split_entry_index + 1, self.entries.items[split_entry_index]) catch @panic("Out of bounds or OOM");
+
+            self.entries.items[split_entry_index + 1].length -= (index - entries_length) + 1;
+            self.entries.items[split_entry_index + 1].start += index - entries_length + 1;
+
+            self.entries.items[split_entry_index].length = index - entries_length;
+        }
+    }
+
+    pub fn remove(self: *Self, index: usize, count: usize) Error!void {
+        for (0..count) |_| {
+            self.remove_one(index) catch |err| return err;
+        }
+    }
 };
 
 test "init and deinit empty piece table" {
@@ -160,19 +205,57 @@ test "init piece table and check text" {
     try std.testing.expectEqualStrings(string, actual_text);
 }
 
-test "init piece table, modify it and check text" {
+test "init piece table, add to it and check text" {
     const string = "This is some test data!\nThis is more data.";
     const expected_text = "Hello!\nThis certainly is some test data!\nThis is not more data.";
 
     var piece_table = PieceTable.init(std.testing.allocator, string);
     defer piece_table.deinit();
 
-    piece_table.insert(5, "certainly ");
-    piece_table.insert(42, "not ");
-    piece_table.insert(0, "Hello!\n");
+    try piece_table.insert(5, "certainly ");
+    try piece_table.insert(42, "not ");
+    try piece_table.insert(0, "Hello!\n");
 
     const actual_text = piece_table.text();
     defer piece_table.allocator.free(actual_text);
 
     try std.testing.expectEqualStrings(expected_text, actual_text);
+}
+
+test "init piece table, remove from it and check text" {
+    const string = "This is some test data!\nThis is more data.";
+    const expected_text = "This some test data\nThis more data";
+
+    var piece_table = PieceTable.init(std.testing.allocator, string);
+    defer piece_table.deinit();
+
+    try piece_table.remove(5, 3);
+    try piece_table.remove(26, 3);
+    try piece_table.remove(19, 1);
+    try piece_table.remove(34, 1);
+
+    const actual_text = piece_table.text();
+    defer piece_table.allocator.free(actual_text);
+
+    try std.testing.expectEqualStrings(expected_text, actual_text);
+}
+
+test "init piece table, attempt to insert out of range" {
+    const string = "This is some test data!\nThis is more data.";
+
+    var piece_table = PieceTable.init(std.testing.allocator, string);
+    defer piece_table.deinit();
+
+    const ret = piece_table.insert(42, "Not allowed");
+    try std.testing.expectError(PieceTable.Error.IndexOutOfRange, ret);
+}
+
+test "init piece table, attempt to remove out of range" {
+    const string = "This is some test data!\nThis is more data.";
+
+    var piece_table = PieceTable.init(std.testing.allocator, string);
+    defer piece_table.deinit();
+
+    const ret = piece_table.remove(42, 1);
+    try std.testing.expectError(PieceTable.Error.IndexOutOfRange, ret);
 }
