@@ -1,0 +1,14 @@
+scripted, with lua, to declare callbacks that completely define how the editor behaves
+callbacks can create panes, open files, create pipelines to run files
+should include a terminal and/or an output with no shell
+
+should have separate components:
+- buffer editing backend (piece table)
+- ui drawing
+- input translator accounting for different terminals
+- take action on inputs based on lua spec
+- lua interpreter including callbacks
+
+
+execution:
+start with just drawing a single buffer in a pane to the screen, editing, and saving
