@@ -108,13 +108,21 @@ pub const PieceTable = struct {
     }
 
     pub fn insert(self: *Self, index: usize, data: []const u8) Error!void {
-        if (index >= self.length()) {
+        if (index > self.length()) {
             return Error.IndexOutOfRange;
         }
 
         const change_start_index = self.changes_len;
 
         self.append_changes(data);
+
+        if (index == self.length()) {
+            self.entries.append(.{
+                .source = .Changes,
+                .start = change_start_index,
+                .length = data.len,
+            }) catch @panic("OOM");
+        }
 
         var split_entry_index: usize = 0;
         var split_entry_length: usize = 0;
@@ -136,7 +144,7 @@ pub const PieceTable = struct {
             .length = data.len,
         }) catch @panic("Out of bounds or OOM");
 
-        self.entries.insert(split_entry_index + 2, self.entries.items[split_entry_index]) catch @panic("Out of bounds or OOM");
+        self.entries.insert(split_entry_index + 2, self.entries.items[split_entry_index]) catch @panic("OOM");
 
         self.entries.items[split_entry_index + 2].length = split_entry_length - (index - entries_length);
         self.entries.items[split_entry_index + 2].start += index - entries_length;
@@ -210,6 +218,35 @@ pub const PieceTable = struct {
 
         return Error.IndexOutOfRange;
     }
+
+    pub fn line_length(self: Self, line: usize) Error!usize {
+        var remaining_lines: usize = line;
+        var current_char: usize = 0;
+
+        const start = try self.line_start(line);
+
+        for (0..self.entries.items.len) |i| {
+            const entry_contents = self.entry_text(self.entries.items[i]);
+
+            for (0..entry_contents.len) |j| {
+                if (entry_contents[j] == '\n') {
+                    if (remaining_lines == 0) {
+                        return current_char - start;
+                    }
+
+                    remaining_lines -= 1;
+                }
+
+                current_char += 1;
+            }
+        }
+
+        if (remaining_lines == 0) {
+            return current_char - start;
+        }
+
+        return Error.IndexOutOfRange;
+    }
 };
 
 test "init and deinit empty piece table" {
@@ -275,7 +312,7 @@ test "init piece table, attempt to insert out of range" {
     var piece_table = PieceTable.init(std.testing.allocator, string);
     defer piece_table.deinit();
 
-    const ret = piece_table.insert(42, "Not allowed");
+    const ret = piece_table.insert(43, "Not allowed");
     try std.testing.expectError(PieceTable.Error.IndexOutOfRange, ret);
 }
 
@@ -316,4 +353,32 @@ test "init piece table, change data, get start of various lines" {
     try std.testing.expectEqual(85, piece_table.line_start(4));
     try std.testing.expectEqual(110, piece_table.line_start(5));
     try std.testing.expectEqual(144, piece_table.line_start(6));
+}
+
+test "init piece table, get length of lines" {
+    var piece_table = PieceTable.init(std.testing.allocator, "This is some test data!\nThis is more data.\nThis, yet again, is data\nYou're never going to believe it!\nI found some more data.");
+    defer piece_table.deinit();
+
+    try std.testing.expectEqual(23, piece_table.line_length(0));
+    try std.testing.expectEqual(18, piece_table.line_length(1));
+    try std.testing.expectEqual(24, piece_table.line_length(2));
+    try std.testing.expectEqual(33, piece_table.line_length(3));
+    try std.testing.expectEqual(23, piece_table.line_length(4));
+}
+
+test "init piece table, chance contents, get length of lines" {
+    var piece_table = PieceTable.init(std.testing.allocator, "This is some test data!\nThis is more data.\nThis, yet again, is data\nYou're never going to believe it!\nI found some more data.");
+    defer piece_table.deinit();
+
+    try piece_table.remove(5, 3);
+    try piece_table.remove(26, 3);
+    try piece_table.remove(41, 12);
+    try piece_table.remove(57, 45);
+    try piece_table.insert(62, "\nWe're all data.");
+
+    try std.testing.expectEqual(20, piece_table.line_length(0));
+    try std.testing.expectEqual(15, piece_table.line_length(1));
+    try std.testing.expectEqual(12, piece_table.line_length(2));
+    try std.testing.expectEqual(12, piece_table.line_length(3));
+    try std.testing.expectEqual(15, piece_table.line_length(4));
 }
