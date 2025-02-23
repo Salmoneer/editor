@@ -14,8 +14,7 @@ const PieceTableSource = enum {
     Changes,
 };
 
-/// A piece table with two buffers
-const PieceTable = struct {
+pub const PieceTable = struct {
     const EntryArray = ArrayList(PieceTableEntry);
 
     allocator: std.mem.Allocator,
@@ -166,6 +165,9 @@ const PieceTable = struct {
 
         if (entries_length + split_entry_length - 1 == index) {
             self.entries.items[split_entry_index].length -= 1;
+        } else if (index - entries_length == 0) {
+            self.entries.items[split_entry_index].start += 1;
+            self.entries.items[split_entry_index].length -= 1;
         } else {
             self.entries.insert(split_entry_index + 1, self.entries.items[split_entry_index]) catch @panic("Out of bounds or OOM");
 
@@ -180,6 +182,33 @@ const PieceTable = struct {
         for (0..count) |_| {
             self.remove_one(index) catch |err| return err;
         }
+    }
+
+    pub fn line_start(self: Self, line: usize) Error!usize {
+        if (line == 0) {
+            return 0;
+        }
+
+        var current_char: usize = 0;
+        var current_line: usize = 0;
+
+        for (0..self.entries.items.len) |i| {
+            const entry_contents = self.entry_text(self.entries.items[i]);
+
+            for (0..entry_contents.len) |j| {
+                current_char += 1;
+
+                if (entry_contents[j] == '\n') {
+                    current_line += 1;
+
+                    if (current_line == line) {
+                        return current_char;
+                    }
+                }
+            }
+        }
+
+        return Error.IndexOutOfRange;
     }
 };
 
@@ -258,4 +287,33 @@ test "init piece table, attempt to remove out of range" {
 
     const ret = piece_table.remove(42, 1);
     try std.testing.expectError(PieceTable.Error.IndexOutOfRange, ret);
+}
+
+test "init piece table, get start of various lines" {
+    var piece_table = PieceTable.init(std.testing.allocator, "This is some test data!\nThis is more data.\nThis, yet again, is data\nYou're never going to believe it!\nI found some more data.");
+    defer piece_table.deinit();
+
+    try std.testing.expectEqual(0, piece_table.line_start(0));
+    try std.testing.expectEqual(24, piece_table.line_start(1));
+    try std.testing.expectEqual(43, piece_table.line_start(2));
+    try std.testing.expectEqual(68, piece_table.line_start(3));
+    try std.testing.expectEqual(102, piece_table.line_start(4));
+}
+
+test "init piece table, change data, get start of various lines" {
+    var piece_table = PieceTable.init(std.testing.allocator, "This is some test data!\nThis is more data.\nThis, yet again, is data\nYou're never going to believe it!\nI found some more data.");
+    defer piece_table.deinit();
+
+    try piece_table.remove(0, 23);
+    try piece_table.insert(0, "This is different test data.");
+
+    try piece_table.insert(29, "More different data!\nWith a newline.\n");
+
+    try std.testing.expectEqual(0, piece_table.line_start(0));
+    try std.testing.expectEqual(29, piece_table.line_start(1));
+    try std.testing.expectEqual(50, piece_table.line_start(2));
+    try std.testing.expectEqual(66, piece_table.line_start(3));
+    try std.testing.expectEqual(85, piece_table.line_start(4));
+    try std.testing.expectEqual(110, piece_table.line_start(5));
+    try std.testing.expectEqual(144, piece_table.line_start(6));
 }
