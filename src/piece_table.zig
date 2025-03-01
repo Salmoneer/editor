@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const print = std.debug.print;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
@@ -122,6 +123,8 @@ pub const PieceTable = struct {
                 .start = change_start_index,
                 .length = data.len,
             }) catch @panic("OOM");
+
+            return;
         }
 
         var split_entry_index: usize = 0;
@@ -246,6 +249,34 @@ pub const PieceTable = struct {
         }
 
         return Error.IndexOutOfRange;
+    }
+
+    pub fn line_contents(self: Self, line: usize) ![]u8 {
+        const string = self.allocator.alloc(u8, try self.line_length(line)) catch @panic("OOM");
+        var string_index: usize = 0;
+
+        var remaining_lines: usize = line + 1;
+
+        for (0..self.entries.items.len) |i| {
+            const entry_contents = self.entry_text(self.entries.items[i]);
+
+            for (0..entry_contents.len) |j| {
+                if (entry_contents[j] == '\n') {
+                    remaining_lines -= 1;
+                } else if (remaining_lines == 1) {
+                    string[string_index] = entry_contents[j];
+                    string_index += 1;
+                }
+
+                if (remaining_lines == 0) {
+                    assert(string_index == string.len);
+                    return string;
+                }
+            }
+        }
+
+        assert(string_index == string.len);
+        return string;
     }
 };
 
@@ -381,4 +412,25 @@ test "init piece table, chance contents, get length of lines" {
     try std.testing.expectEqual(12, piece_table.line_length(2));
     try std.testing.expectEqual(12, piece_table.line_length(3));
     try std.testing.expectEqual(15, piece_table.line_length(4));
+}
+
+test "init piece table, change contents, get contents of lines" {
+    var piece_table = PieceTable.init(std.testing.allocator, "This is some test data\nThis is more data.\nThis is even more data.");
+    defer piece_table.deinit();
+
+    try piece_table.remove(13, 18);
+    try piece_table.insert(piece_table.length(), "\nOh look more still.");
+
+    const expected_lines = .{
+        "This is some more data.",
+        "This is even more data.",
+        "Oh look more still.",
+    };
+
+    inline for (0..3) |i| {
+        const actual_line = try piece_table.line_contents(i);
+        defer piece_table.allocator.free(actual_line);
+
+        try std.testing.expectEqualStrings(expected_lines[i], actual_line);
+    }
 }
